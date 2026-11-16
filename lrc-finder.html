@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LRC-Finder</title>
+<style>
+:root{
+  --bg:#f3efe6; --surface:#fffdf8; --ink:#1d1b18; --muted:#6b665d; --line:#d9d2c2;
+  --accent:#1f5d50; --accent-ink:#ffffff; --warn:#9a4a12; --sel:#e4efe9;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#15171a; --surface:#1d2024; --ink:#eceae4; --muted:#9a9a93; --line:#33373d;
+    --accent:#6fcfb4; --accent-ink:#0f1f1b; --warn:#e0a064; --sel:#24332e; color-scheme:dark;}
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 "Iowan Old Style","Palatino Linotype",Georgia,serif;
+  padding:max(20px,env(safe-area-inset-top)) 20px 40px}
+main{max-width:920px;margin:0 auto}
+h1{font-size:2rem;margin:.4em 0 .1em;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 1.4rem;max-width:60ch}
+form{display:flex;gap:8px;flex-wrap:wrap}
+input[type=search]{flex:1 1 260px;font:inherit;padding:12px 14px;border:1.5px solid var(--line);
+  border-radius:6px;background:var(--surface);color:var(--ink)}
+button{font:inherit;cursor:pointer;border-radius:6px;padding:12px 18px;border:1.5px solid var(--accent);
+  background:var(--accent);color:var(--accent-ink)}
+button.ghost{background:transparent;color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#status{margin:1rem 0;color:var(--muted);min-height:1.5em}
+#status.err{color:var(--warn)}
+.layout{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+@media (max-width:760px){.layout{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1.5px solid var(--line);border-radius:8px;overflow:hidden}
+.panel h2{font-size:1rem;margin:0;padding:10px 14px;border-bottom:1.5px solid var(--line);color:var(--muted);font-weight:normal}
+#results{list-style:none;margin:0;padding:0;max-height:520px;overflow:auto}
+#results li button{all:unset;box-sizing:border-box;display:block;width:100%;padding:10px 14px;cursor:pointer;
+  border-bottom:1px solid var(--line)}
+#results li button:hover{background:var(--sel)}
+#results li button[aria-current=true]{background:var(--sel);box-shadow:inset 4px 0 0 var(--accent)}
+#results li button:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+.t{font-weight:bold}
+.m{color:var(--muted);font-size:.9rem}
+.tag{display:inline-block;font-size:.78rem;border:1px solid var(--accent);color:var(--accent);border-radius:99px;padding:0 8px;margin-left:6px}
+.tag.plain{border-color:var(--muted);color:var(--muted)}
+#detail{padding:14px}
+#detail .actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+#preview{white-space:pre-wrap;font:.88rem/1.6 ui-monospace,Menlo,Consolas,monospace;max-height:380px;overflow:auto;
+  border-top:1px solid var(--line);padding-top:10px;margin:0}
+.empty{padding:18px 14px;color:var(--muted)}
+.note{margin-top:1.6rem;color:var(--muted);font-size:.85rem;max-width:70ch}
+</style>
+</head>
+<body>
+<main>
+  <h1>LRC-Finder</h1>
+  <p class="sub">Suche nach Song oder Künstler und lade die zeitgestempelten Lyrics als .lrc-Datei herunter. Die Daten kommen von LRCLIB, einer offenen Lyrics-Datenbank.</p>
+
+  <form id="f" role="search">
+    <input type="search" id="q" placeholder="Songtitel, Künstler oder beides" aria-label="Suche" autofocus>
+    <button type="submit" id="go">Suchen</button>
+  </form>
+  <div id="status" role="status" aria-live="polite"></div>
+
+  <div class="layout">
+    <section class="panel" aria-label="Ergebnisse">
+      <h2>Ergebnisse</h2>
+      <ul id="results"><li class="empty">Noch keine Suche.</li></ul>
+    </section>
+    <section class="panel" aria-label="Details">
+      <h2>Auswahl</h2>
+      <div id="detail"><div class="empty" style="padding:4px 0">Wähle links einen Song aus.</div></div>
+    </section>
+  </div>
+
+  <p class="note">Lyrics sind urheberrechtlich geschützt. Nutze die Dateien nur privat, zum Beispiel für deinen eigenen Musikplayer, und verbreite sie nicht weiter. Die Seite muss mit Internetverbindung lokal im Browser geöffnet werden.</p>
+</main>
+
+<script>
+const API = "https://lrclib.net/api";
+const $ = id => document.getElementById(id);
+const statusEl = $("status"), listEl = $("results"), detailEl = $("detail");
+let items = [], selected = null;
+
+function setStatus(msg, err){ statusEl.textContent = msg; statusEl.className = err ? "err" : ""; }
+function fmt(sec){ if(!sec && sec!==0) return ""; const m=Math.floor(sec/60), s=Math.round(sec%60); return m+":"+String(s).padStart(2,"0"); }
+function esc(s){ const d=document.createElement("div"); d.textContent=s ?? ""; return d.innerHTML; }
+
+$("f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if(!q) return;
+  $("go").disabled = true;
+  setStatus("Suche läuft …");
+  listEl.innerHTML = ""; selected = null;
+  detailEl.innerHTML = '<div class="empty" style="padding:4px 0">Wähle links einen Song aus.</div>';
+  try{
+    const res = await fetch(API + "/search?q=" + encodeURIComponent(q));
+    if(!res.ok) throw new Error("Server antwortete mit Status " + res.status);
+    items = await res.json();
+    if(!items.length){
+      listEl.innerHTML = '<li class="empty">Nichts gefunden. Versuche es mit weniger Wörtern oder "Künstler Titel".</li>';
+      setStatus("");
+    } else {
+      render();
+      setStatus(items.length + " Ergebnisse");
+    }
+  }catch(err){
+    setStatus("Fehler bei der Suche: " + err.message + ". Prüfe deine Internetverbindung.", true);
+    listEl.innerHTML = '<li class="empty">Keine Ergebnisse.</li>';
+  }finally{ $("go").disabled = false; }
+});
+
+function render(){
+  listEl.innerHTML = "";
+  items.forEach((it, i) => {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    const synced = !!it.syncedLyrics;
+    b.innerHTML = `<div class="t">${esc(it.trackName)}${synced ? '<span class="tag">synchron</span>' : (it.plainLyrics ? '<span class="tag plain">nur Text</span>' : '')}</div>
+      <div class="m">${esc(it.artistName)}${it.albumName ? " · " + esc(it.albumName) : ""}${it.duration ? " · " + fmt(it.duration) : ""}</div>`;
+    b.onclick = () => select(i);
+    li.appendChild(b); listEl.appendChild(li);
+  });
+}
+
+function select(i){
+  selected = items[i];
+  [...listEl.querySelectorAll("button")].forEach((b,k)=> b.setAttribute("aria-current", k===i ? "true":"false"));
+  const it = selected;
+  const hasSync = !!it.syncedLyrics, hasPlain = !!it.plainLyrics;
+  const text = hasSync ? it.syncedLyrics : (it.plainLyrics || "");
+  detailEl.innerHTML = `
+    <div class="t">${esc(it.trackName)}</div>
+    <div class="m">${esc(it.artistName)}${it.albumName ? " · " + esc(it.albumName) : ""}${it.duration ? " · " + fmt(it.duration) : ""}</div>
+    <div class="actions">
+      <button id="dl-lrc" ${hasSync ? "" : "disabled"}>.lrc herunterladen</button>
+      <button id="dl-txt" class="ghost" ${hasPlain || hasSync ? "" : "disabled"}>.txt (ohne Zeiten)</button>
+    </div>
+    ${hasSync ? "" : '<div class="m" style="margin-bottom:8px">Für diesen Eintrag gibt es keine Zeitstempel. Probiere ein anderes Ergebnis.</div>'}
+    ${it.instrumental ? '<div class="m">Dieser Titel ist als Instrumental markiert.</div>' : ""}
+    <pre id="preview"></pre>`;
+  $("preview").textContent = text;
+  $("dl-lrc").onclick = () => download(buildLrc(it), ".lrc");
+  $("dl-txt").onclick = () => download(plainText(it), ".txt");
+}
+
+function buildLrc(it){
+  let body = it.syncedLyrics.trim();
+  const has = t => new RegExp("^\\[" + t + ":", "m").test(body);
+  const head = [];
+  if(!has("ti")) head.push(`[ti:${it.trackName}]`);
+  if(!has("ar")) head.push(`[ar:${it.artistName}]`);
+  if(it.albumName && !has("al")) head.push(`[al:${it.albumName}]`);
+  if(it.duration && !has("length")) head.push(`[length:${fmt(it.duration)}]`);
+  return (head.length ? head.join("\n") + "\n" : "") + body + "\n";
+}
+
+function plainText(it){
+  if(it.plainLyrics) return it.plainLyrics;
+  return it.syncedLyrics.split("\n").map(l => l.replace(/^(\[[^\]]*\]\s*)+/, "")).join("\n");
+}
+
+function download(content, ext){
+  const name = (selected.artistName + " - " + selected.trackName).replace(/[\\/:*?"<>|]+/g, "_") + ext;
+  const blob = new Blob([content], {type:"text/plain;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus("Gespeichert als " + name);
+}
+</script>
+</body>
+</html>
